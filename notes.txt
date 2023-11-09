@@ -1,0 +1,156 @@
+I set up my docker from here: 
+Follow these steps. However, I did not make any custom docker customizations, so for a default setup this is not necessary
+https://hevodata.com/learn/docker-mysql/
+
+
+To run on a general use:
+sudo docker run -p 13306:3306 --name cotdb -eMYSQL_ROOT_PASSWORD=dockerpassword -d mysql:latest
+
+When the docker is up and running connect to the mysql server on it with:
+mysql --host=127.0.0.1 --port=13306 -u root -p
+NOTE, it takes some time after the docker starts for the mysql server to start so it might take a bit for the previous command to actually work usually 1-2 minutes tops from my experience
+
+And then when you're in the mysql bash session enter:
+source /path/to/file/named/cot.sql
+This will populate the mysql database with all of the same tables as on dep environment with a couple of test users
+
+
+Make sure when you're done to stop the docker and rm it with these two commands:
+sudo docker stop cotdb
+sudo docker rm cotdb
+
+Also note that every time you stop and rm your container you will need to re-populate the database when you run the container again, but this is only necessary if you rm, not if you only stop
+
+
+I refactored everything to use message user
+
+Then I changed messageUser to:
+
+func MessageUser(phone string, message string) {
+	if message == "" {
+		return
+	}
+	if len(message) > 480 {
+		messageList := strings.Split(message, "\n")
+		newMessage := ""
+
+		if len(messageList[0]) > 960 {
+			MessageUser(phone, messageList[0][0:len(messageList[0])/2])
+			MessageUser(phone, messageList[0][len(messageList[0])/2:len(messageList[0])])
+		} else {
+			for i := 0; i < len(messageList); i++ {
+				if len(newMessage)+len(messageList[i])+1 > 480 {
+					MessageUser(phone, newMessage)
+					newMessage = ""
+				}
+				newMessage += messageList[i] + "\n"
+			}
+			MessageUser(phone, newMessage)
+		}
+
+	} else {
+		fmt.Printf("\t %s, your number is: %s\n", message, phone)
+	}
+}
+
+This has now slightly changed, we send asynchronous messages via invite user and flight request so for inviting a user add this line
+inviteMessage := fmt.Sprintf("\t %s is inviting you to CrewsOutThere! Please respond with your name to be added or ignore if this is not meant for you.", inviterName)
+
+Then in buildRequestMessage do this
+requestMessage := "\t" + requesterName + " is building a crew: " + message + " type Yes or No or ignore."
+
+The \t is to simulate a user that didn't make the initial request receiving a message from the system
+
+Then in crewDriver.go I commented out the twilioConnect call as well as the listenAndServer and the InitLogger call. Then I added this to the end of the code
+
+// If you want to respond as a specific number, enter command as: [phone_number]:[rest of message]
+	// Otherwise it will default to defaultPhone
+	phonePrefix := "%2b"
+	for {
+		defaultPhone := "11234567890"
+		var inText string
+		scanner := bufio.NewScanner(os.Stdin)
+
+		fmt.Print("\n\nEnter Text: ")
+		if scanner.Scan() {
+			inText = scanner.Text()
+		}
+
+		// If user input phone number, parse it for use
+		inputPhone, request := splitStringByFirstColon(inText)
+		if inputPhone != "" {
+			// Need to prepend a 1 to non-default phones to pass verification
+			defaultPhone = "1" + inputPhone
+			inText = request
+		}
+
+		defaultPhone = phonePrefix + defaultPhone
+
+		fmt.Printf("Phone number: %s\nMessage: %s\n", defaultPhone, inText)
+
+		response := command.ValidateAndParse(inText, defaultPhone, time.Now().UnixMilli())
+		fmt.Printf("\nRESPONSE (%d chars): %s\n", len(response), response)
+	}
+
+}
+
+// Used to allow us to specify what phone number we want to message as
+func splitStringByFirstColon(input string) (string, string) {
+	index := strings.Index(input, ":")
+	if index == -1 {
+		// Return empty strings if colon is not found
+		return "", ""
+	}
+
+	phone_number := input[:index]
+	request := input[index+1:]
+
+	return phone_number, request
+}
+
+I did the splitStringByFirstColon function so that you can enter a custome phone number in order to simulate
+a user responding to a message by typing [phone_number]:message. If the user just types message then it will default to defaultPhone.
+
+In connectDB.go I slightly modified the dbAdminConnect function to this:
+
+// Connect to the cot database as an admin
+func DBAdminConnect() {
+	userPassword, adminPassword = encryption.GetDBPasswords()
+	db_ip := encryption.GetDBIp()
+	fmt.Printf("%s\n", db_ip)
+	fmt.Printf("%s\n", adminPassword)
+	cfg := mysql.Config{
+		User:   "root",
+		Passwd: adminPassword,
+		Net:    "tcp",
+		Addr:   db_ip,
+		DBName: "cotdb",
+	}
+	// Get a database handle
+	var err error
+	for {
+		DB, err = sql.Open("mysql", cfg.FormatDSN())
+		if err == nil {
+			err = DB.Ping()
+			if err == nil {
+				break
+			}
+		} else {
+			fmt.Printf("%s\n", err)
+			time.Sleep(5)
+		}
+	}
+}
+
+I changed the user to root as that is what I had my docker configured to.
+
+
+
+Then there is a slightly modified cot.conf file where I changed the dpip and dbadmin password to:
+db_admin_pw:dockerpassword
+db_ip:127.0.0.1:13306
+
+these changes are so that I can connect to a mysql server running in docker.
+
+Then most importantly when you start up the docker you must run cot.sql to populate the 
+docker database with test data.
